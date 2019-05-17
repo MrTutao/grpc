@@ -33,21 +33,37 @@ def _build_expected_addrs_cmd_arg(expected_addrs):
     out.append('%s,%s' % (addr['address'], str(addr['is_balancer'])))
   return ';'.join(out)
 
+def _resolver_test_cases(resolver_component_data):
+  out = []
+  for test_case in resolver_component_data['resolver_component_tests']:
+    target_name = _append_zone_name(
+        test_case['record_to_resolve'],
+        resolver_component_data['resolver_tests_common_zone_name'])
+    out.append({
+        'test_title': target_name,
+        'arg_names_and_values': [
+            ('target_name', target_name),
+            ('expected_addrs',
+             _build_expected_addrs_cmd_arg(test_case['expected_addrs'])),
+            ('expected_chosen_service_config',
+             (test_case['expected_chosen_service_config'] or '')),
+            ('expected_service_config_error', (test_case['expected_service_config_error'] or '')),
+            ('expected_lb_policy', (test_case['expected_lb_policy'] or '')),
+            ('enable_srv_queries', test_case['enable_srv_queries']),
+            ('enable_txt_queries', test_case['enable_txt_queries']),
+            ('inject_broken_nameserver_list', test_case['inject_broken_nameserver_list']),
+        ],
+    })
+  return out
+
 def main():
   resolver_component_data = ''
   with open('test/cpp/naming/resolver_test_record_groups.yaml') as f:
     resolver_component_data = yaml.load(f)
 
   json = {
-      'resolver_component_test_cases': [
-          {
-              'target_name': _append_zone_name(test_case['record_to_resolve'],
-                                                 resolver_component_data['resolver_component_tests_common_zone_name']),
-              'expected_addrs': _build_expected_addrs_cmd_arg(test_case['expected_addrs']),
-              'expected_chosen_service_config': (test_case['expected_chosen_service_config'] or ''),
-              'expected_lb_policy': (test_case['expected_lb_policy'] or ''),
-          } for test_case in resolver_component_data['resolver_component_tests']
-      ],
+      'resolver_tests_common_zone_name': resolver_component_data['resolver_tests_common_zone_name'],
+      'resolver_component_test_cases': _resolver_test_cases(resolver_component_data),
       'targets': [
           {
               'name': 'resolver_component_test' + unsecure_build_config_suffix,
@@ -56,11 +72,11 @@ def main():
               'gtest': False,
               'run': False,
               'src': ['test/cpp/naming/resolver_component_test.cc'],
-              'platforms': ['linux', 'posix', 'mac'],
+              'platforms': ['linux', 'posix', 'mac', 'windows'],
               'deps': [
+                  'dns_test_util',
                   'grpc++_test_util' + unsecure_build_config_suffix,
                   'grpc_test_util' + unsecure_build_config_suffix,
-                  'gpr_test_util',
                   'grpc++' + unsecure_build_config_suffix,
                   'grpc' + unsecure_build_config_suffix,
                   'gpr',
@@ -79,7 +95,6 @@ def main():
               'deps': [
                   'grpc++_test_util',
                   'grpc_test_util',
-                  'gpr_test_util',
                   'grpc++',
                   'grpc',
                   'gpr',
@@ -90,6 +105,43 @@ def main():
                   '--running_under_bazel=false',
               ],
           } for unsecure_build_config_suffix in ['_unsecure', '']
+      ] + [
+          {
+              'name': 'address_sorting_test' + unsecure_build_config_suffix,
+              'build': 'test',
+              'language': 'c++',
+              'gtest': True,
+              'run': True,
+              'src': ['test/cpp/naming/address_sorting_test.cc'],
+              'platforms': ['linux', 'posix', 'mac', 'windows'],
+              'deps': [
+                  'grpc++_test_util' + unsecure_build_config_suffix,
+                  'grpc_test_util' + unsecure_build_config_suffix,
+                  'grpc++' + unsecure_build_config_suffix,
+                  'grpc' + unsecure_build_config_suffix,
+                  'gpr',
+                  'grpc++_test_config',
+              ],
+          } for unsecure_build_config_suffix in ['_unsecure', '']
+      ] + [
+          {
+          'name': 'cancel_ares_query_test',
+          'build': 'test',
+          'language': 'c++',
+          'gtest': True,
+          'run': True,
+          'src': ['test/cpp/naming/cancel_ares_query_test.cc'],
+          'platforms': ['linux', 'posix', 'mac', 'windows'],
+          'deps': [
+              'dns_test_util',
+              'grpc++_test_util',
+              'grpc_test_util',
+              'grpc++',
+              'grpc',
+              'gpr',
+              'grpc++_test_config',
+          ],
+          },
       ]
   }
 

@@ -21,31 +21,42 @@
 
 #include <grpc/grpc_security.h>
 
-#include <grpc++/security/credentials.h>
-#include <grpc++/support/config.h>
+#include <grpcpp/security/credentials.h>
+#include <grpcpp/support/config.h>
 
+#include "src/core/lib/security/credentials/credentials.h"
 #include "src/cpp/server/thread_pool_interface.h"
 
-namespace grpc {
+namespace grpc_impl {
 
 class SecureChannelCredentials final : public ChannelCredentials {
  public:
   explicit SecureChannelCredentials(grpc_channel_credentials* c_creds);
-  ~SecureChannelCredentials() { grpc_channel_credentials_release(c_creds_); }
+  ~SecureChannelCredentials() {
+    if (c_creds_ != nullptr) c_creds_->Unref();
+  }
   grpc_channel_credentials* GetRawCreds() { return c_creds_; }
 
-  std::shared_ptr<grpc::Channel> CreateChannel(
-      const string& target, const grpc::ChannelArguments& args) override;
+  std::shared_ptr<::grpc::Channel> CreateChannelImpl(
+      const grpc::string& target, const grpc::ChannelArguments& args) override;
+
   SecureChannelCredentials* AsSecureCredentials() override { return this; }
 
  private:
+  std::shared_ptr<::grpc::Channel> CreateChannelWithInterceptors(
+      const grpc::string& target, const grpc::ChannelArguments& args,
+      std::vector<std::unique_ptr<
+          ::grpc::experimental::ClientInterceptorFactoryInterface>>
+          interceptor_creators) override;
   grpc_channel_credentials* const c_creds_;
 };
 
 class SecureCallCredentials final : public CallCredentials {
  public:
   explicit SecureCallCredentials(grpc_call_credentials* c_creds);
-  ~SecureCallCredentials() { grpc_call_credentials_release(c_creds_); }
+  ~SecureCallCredentials() {
+    if (c_creds_ != nullptr) c_creds_->Unref();
+  }
   grpc_call_credentials* GetRawCreds() { return c_creds_; }
 
   bool ApplyToCall(grpc_call* call) override;
@@ -55,19 +66,30 @@ class SecureCallCredentials final : public CallCredentials {
   grpc_call_credentials* const c_creds_;
 };
 
+}  // namespace grpc_impl
+
+namespace grpc {
+
 class MetadataCredentialsPluginWrapper final : private GrpcLibraryCodegen {
  public:
   static void Destroy(void* wrapper);
-  static void GetMetadata(void* wrapper, grpc_auth_metadata_context context,
-                          grpc_credentials_plugin_metadata_cb cb,
-                          void* user_data);
+  static int GetMetadata(
+      void* wrapper, grpc_auth_metadata_context context,
+      grpc_credentials_plugin_metadata_cb cb, void* user_data,
+      grpc_metadata creds_md[GRPC_METADATA_CREDENTIALS_PLUGIN_SYNC_MAX],
+      size_t* num_creds_md, grpc_status_code* status,
+      const char** error_details);
 
   explicit MetadataCredentialsPluginWrapper(
       std::unique_ptr<MetadataCredentialsPlugin> plugin);
 
  private:
-  void InvokePlugin(grpc_auth_metadata_context context,
-                    grpc_credentials_plugin_metadata_cb cb, void* user_data);
+  void InvokePlugin(
+      grpc_auth_metadata_context context,
+      grpc_credentials_plugin_metadata_cb cb, void* user_data,
+      grpc_metadata creds_md[GRPC_METADATA_CREDENTIALS_PLUGIN_SYNC_MAX],
+      size_t* num_creds_md, grpc_status_code* status_code,
+      const char** error_details);
   std::unique_ptr<ThreadPoolInterface> thread_pool_;
   std::unique_ptr<MetadataCredentialsPlugin> plugin_;
 };

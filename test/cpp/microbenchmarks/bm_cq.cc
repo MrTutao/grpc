@@ -20,20 +20,17 @@
  * working */
 
 #include <benchmark/benchmark.h>
-#include <grpc++/completion_queue.h>
-#include <grpc++/impl/grpc_library.h>
 #include <grpc/grpc.h>
 #include <grpc/support/log.h>
+#include <grpcpp/completion_queue.h>
+#include <grpcpp/impl/grpc_library.h>
 #include "test/cpp/microbenchmarks/helpers.h"
+#include "test/cpp/util/test_config.h"
 
-extern "C" {
 #include "src/core/lib/surface/completion_queue.h"
-}
 
 namespace grpc {
 namespace testing {
-
-auto& force_library_initialization = Library::get();
 
 static void BM_CreateDestroyCpp(benchmark::State& state) {
   TrackCounters track_counters;
@@ -49,7 +46,7 @@ static void BM_CreateDestroyCpp2(benchmark::State& state) {
   TrackCounters track_counters;
   while (state.KeepRunning()) {
     grpc_completion_queue* core_cq =
-        grpc_completion_queue_create_for_next(NULL);
+        grpc_completion_queue_create_for_next(nullptr);
     CompletionQueue cq(core_cq);
   }
   track_counters.Finish(state);
@@ -61,16 +58,17 @@ static void BM_CreateDestroyCore(benchmark::State& state) {
   while (state.KeepRunning()) {
     // TODO: sreek Templatize this benchmark and pass completion type and
     // polling type as parameters
-    grpc_completion_queue_destroy(grpc_completion_queue_create_for_next(NULL));
+    grpc_completion_queue_destroy(
+        grpc_completion_queue_create_for_next(nullptr));
   }
   track_counters.Finish(state);
 }
 BENCHMARK(BM_CreateDestroyCore);
 
-static void DoneWithCompletionOnStack(grpc_exec_ctx* exec_ctx, void* arg,
+static void DoneWithCompletionOnStack(void* arg,
                                       grpc_cq_completion* completion) {}
 
-class DummyTag final : public CompletionQueueTag {
+class DummyTag final : public internal::CompletionQueueTag {
  public:
   bool FinalizeResult(void** tag, bool* status) override { return true; }
 };
@@ -82,11 +80,11 @@ static void BM_Pass1Cpp(benchmark::State& state) {
   while (state.KeepRunning()) {
     grpc_cq_completion completion;
     DummyTag dummy_tag;
-    grpc_exec_ctx exec_ctx = GRPC_EXEC_CTX_INIT;
+    grpc_core::ExecCtx exec_ctx;
     GPR_ASSERT(grpc_cq_begin_op(c_cq, &dummy_tag));
-    grpc_cq_end_op(&exec_ctx, c_cq, &dummy_tag, GRPC_ERROR_NONE,
-                   DoneWithCompletionOnStack, NULL, &completion);
-    grpc_exec_ctx_finish(&exec_ctx);
+    grpc_cq_end_op(c_cq, &dummy_tag, GRPC_ERROR_NONE, DoneWithCompletionOnStack,
+                   nullptr, &completion);
+
     void* tag;
     bool ok;
     cq.Next(&tag, &ok);
@@ -98,16 +96,16 @@ BENCHMARK(BM_Pass1Cpp);
 static void BM_Pass1Core(benchmark::State& state) {
   TrackCounters track_counters;
   // TODO: sreek Templatize this benchmark and pass polling_type as a param
-  grpc_completion_queue* cq = grpc_completion_queue_create_for_next(NULL);
+  grpc_completion_queue* cq = grpc_completion_queue_create_for_next(nullptr);
   gpr_timespec deadline = gpr_inf_future(GPR_CLOCK_MONOTONIC);
   while (state.KeepRunning()) {
     grpc_cq_completion completion;
-    grpc_exec_ctx exec_ctx = GRPC_EXEC_CTX_INIT;
-    GPR_ASSERT(grpc_cq_begin_op(cq, NULL));
-    grpc_cq_end_op(&exec_ctx, cq, NULL, GRPC_ERROR_NONE,
-                   DoneWithCompletionOnStack, NULL, &completion);
-    grpc_exec_ctx_finish(&exec_ctx);
-    grpc_completion_queue_next(cq, deadline, NULL);
+    grpc_core::ExecCtx exec_ctx;
+    GPR_ASSERT(grpc_cq_begin_op(cq, nullptr));
+    grpc_cq_end_op(cq, nullptr, GRPC_ERROR_NONE, DoneWithCompletionOnStack,
+                   nullptr, &completion);
+
+    grpc_completion_queue_next(cq, deadline, nullptr);
   }
   grpc_completion_queue_destroy(cq);
   track_counters.Finish(state);
@@ -117,16 +115,16 @@ BENCHMARK(BM_Pass1Core);
 static void BM_Pluck1Core(benchmark::State& state) {
   TrackCounters track_counters;
   // TODO: sreek Templatize this benchmark and pass polling_type as a param
-  grpc_completion_queue* cq = grpc_completion_queue_create_for_pluck(NULL);
+  grpc_completion_queue* cq = grpc_completion_queue_create_for_pluck(nullptr);
   gpr_timespec deadline = gpr_inf_future(GPR_CLOCK_MONOTONIC);
   while (state.KeepRunning()) {
     grpc_cq_completion completion;
-    grpc_exec_ctx exec_ctx = GRPC_EXEC_CTX_INIT;
-    GPR_ASSERT(grpc_cq_begin_op(cq, NULL));
-    grpc_cq_end_op(&exec_ctx, cq, NULL, GRPC_ERROR_NONE,
-                   DoneWithCompletionOnStack, NULL, &completion);
-    grpc_exec_ctx_finish(&exec_ctx);
-    grpc_completion_queue_pluck(cq, NULL, deadline, NULL);
+    grpc_core::ExecCtx exec_ctx;
+    GPR_ASSERT(grpc_cq_begin_op(cq, nullptr));
+    grpc_cq_end_op(cq, nullptr, GRPC_ERROR_NONE, DoneWithCompletionOnStack,
+                   nullptr, &completion);
+
+    grpc_completion_queue_pluck(cq, nullptr, deadline, nullptr);
   }
   grpc_completion_queue_destroy(cq);
   track_counters.Finish(state);
@@ -136,17 +134,89 @@ BENCHMARK(BM_Pluck1Core);
 static void BM_EmptyCore(benchmark::State& state) {
   TrackCounters track_counters;
   // TODO: sreek Templatize this benchmark and pass polling_type as a param
-  grpc_completion_queue* cq = grpc_completion_queue_create_for_next(NULL);
+  grpc_completion_queue* cq = grpc_completion_queue_create_for_next(nullptr);
   gpr_timespec deadline = gpr_inf_past(GPR_CLOCK_MONOTONIC);
   while (state.KeepRunning()) {
-    grpc_completion_queue_next(cq, deadline, NULL);
+    grpc_completion_queue_next(cq, deadline, nullptr);
   }
   grpc_completion_queue_destroy(cq);
   track_counters.Finish(state);
 }
 BENCHMARK(BM_EmptyCore);
 
+// Helper for tests to shutdown correctly and tersely
+static void shutdown_and_destroy(grpc_completion_queue* cc) {
+  grpc_completion_queue_shutdown(cc);
+  grpc_completion_queue_destroy(cc);
+}
+
+// Tag completion queue iterate times
+class TagCallback : public grpc_experimental_completion_queue_functor {
+ public:
+  explicit TagCallback(int* iter) : iter_(iter) {
+    functor_run = &TagCallback::Run;
+  }
+  ~TagCallback() {}
+  static void Run(grpc_experimental_completion_queue_functor* cb, int ok) {
+    GPR_ASSERT(static_cast<bool>(ok));
+    *static_cast<TagCallback*>(cb)->iter_ += 1;
+  };
+
+ private:
+  int* iter_;
+};
+
+// Check if completion queue is shut down
+class ShutdownCallback : public grpc_experimental_completion_queue_functor {
+ public:
+  explicit ShutdownCallback(bool* done) : done_(done) {
+    functor_run = &ShutdownCallback::Run;
+  }
+  ~ShutdownCallback() {}
+  static void Run(grpc_experimental_completion_queue_functor* cb, int ok) {
+    *static_cast<ShutdownCallback*>(cb)->done_ = static_cast<bool>(ok);
+  }
+
+ private:
+  bool* done_;
+};
+
+static void BM_Callback_CQ_Pass1Core(benchmark::State& state) {
+  TrackCounters track_counters;
+  int iteration = 0;
+  TagCallback tag_cb(&iteration);
+  bool got_shutdown = false;
+  ShutdownCallback shutdown_cb(&got_shutdown);
+  grpc_completion_queue* cc =
+      grpc_completion_queue_create_for_callback(&shutdown_cb, nullptr);
+  while (state.KeepRunning()) {
+    grpc_core::ApplicationCallbackExecCtx callback_exec_ctx;
+    grpc_core::ExecCtx exec_ctx;
+    grpc_cq_completion completion;
+    GPR_ASSERT(grpc_cq_begin_op(cc, &tag_cb));
+    grpc_cq_end_op(cc, &tag_cb, GRPC_ERROR_NONE, DoneWithCompletionOnStack,
+                   nullptr, &completion);
+  }
+  shutdown_and_destroy(cc);
+  GPR_ASSERT(got_shutdown);
+  GPR_ASSERT(iteration == static_cast<int>(state.iterations()));
+  track_counters.Finish(state);
+}
+BENCHMARK(BM_Callback_CQ_Pass1Core);
+
 }  // namespace testing
 }  // namespace grpc
 
-BENCHMARK_MAIN();
+// Some distros have RunSpecifiedBenchmarks under the benchmark namespace,
+// and others do not. This allows us to support both modes.
+namespace benchmark {
+void RunTheBenchmarksNamespaced() { RunSpecifiedBenchmarks(); }
+}  // namespace benchmark
+
+int main(int argc, char** argv) {
+  LibraryInitializer libInit;
+  ::benchmark::Initialize(&argc, argv);
+  ::grpc::testing::InitTest(&argc, &argv, false);
+  benchmark::RunTheBenchmarksNamespaced();
+  return 0;
+}

@@ -14,7 +14,7 @@
   # See the License for the specific language governing permissions and
   # limitations under the License.
 
-  FROM debian:jessie
+  <%include file="../../debian_jessie_header.include"/>
 
   <%include file="../../apt_get_basic.include"/>
   <%include file="../../gcp_api_libraries.include"/>
@@ -32,5 +32,8 @@
   <%include file="../../python_deps.include"/>
   <%include file="../../node_deps.include"/>
   <%include file="../../run_tests_addons.include"/>
+  # Install Mako to generate files in grpc/grpc-node
+  RUN pip install Mako
+
   # Define the default command.
   CMD ["bash"]

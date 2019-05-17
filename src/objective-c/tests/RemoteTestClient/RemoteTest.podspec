@@ -14,20 +14,34 @@ Pod::Spec.new do |s|
   s.dependency "!ProtoCompiler-gRPCPlugin"
 
   repo_root = '../../../..'
-  bin_dir = "#{repo_root}/bins/$CONFIG"
+  config = ENV['CONFIG'] || 'opt'
+  bin_dir = "#{repo_root}/bins/#{config}"
 
   protoc = "#{bin_dir}/protobuf/protoc"
   well_known_types_dir = "#{repo_root}/third_party/protobuf/src"
   plugin = "#{bin_dir}/grpc_objective_c_plugin"
 
   s.prepare_command = <<-CMD
-    #{protoc} \
-        --plugin=protoc-gen-grpc=#{plugin} \
-        --objc_out=. \
-        --grpc_out=. \
-        -I . \
-        -I #{well_known_types_dir} \
-        *.proto
+    if [ -f #{protoc} ]; then
+      #{protoc} \
+          --plugin=protoc-gen-grpc=#{plugin} \
+          --objc_out=. \
+          --grpc_out=. \
+          -I . \
+          -I #{well_known_types_dir} \
+          *.proto
+    else
+      # protoc was not found bin_dir, use installed version instead
+      (>&2 echo "\nWARNING: Using installed version of protoc. It might be incompatible with gRPC")
+
+      protoc \
+          --plugin=protoc-gen-grpc=#{plugin} \
+          --objc_out=. \
+          --grpc_out=. \
+          -I . \
+          -I #{well_known_types_dir} \
+          *.proto
+    fi
   CMD
 
   s.subspec "Messages" do |ms|
@@ -47,7 +61,7 @@ Pod::Spec.new do |s|
 
   s.pod_target_xcconfig = {
     # This is needed by all pods that depend on Protobuf:
-    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) GPB_USE_PROTOBUF_FRAMEWORK_IMPORTS=1',
+    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) GPB_USE_PROTOBUF_FRAMEWORK_IMPORTS=1 GPB_GRPC_FORWARD_DECLARE_MESSAGE_PROTO=1',
     # This is needed by all pods that depend on gRPC-RxLibrary:
     'CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES' => 'YES',
   }

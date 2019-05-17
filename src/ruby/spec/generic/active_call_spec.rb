@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'grpc'
+require 'spec_helper'
 
 include GRPC::Core::StatusCodes
 
@@ -40,7 +40,7 @@ describe GRPC::ActiveCall do
   before(:each) do
     @pass_through = proc { |x| x }
     host = '0.0.0.0:0'
-    @server = GRPC::Core::Server.new(nil)
+    @server = new_core_server_for_testing(nil)
     server_port = @server.add_http2_port(host, :this_port_is_insecure)
     @server.start
     @ch = GRPC::Core::Channel.new("0.0.0.0:#{server_port}", nil,
@@ -48,7 +48,8 @@ describe GRPC::ActiveCall do
   end
 
   after(:each) do
-    @server.close(deadline)
+    @server.shutdown_and_notify(deadline)
+    @server.close
   end
 
   describe 'restricted view methods' do
@@ -77,6 +78,16 @@ describe GRPC::ActiveCall do
                   send_initial_metadata, metadata_to_send, \
                   merge_metadata_to_send, initial_metadata_sent)
         v = @client_call.single_req_view
+        want.each do |w|
+          expect(v.methods.include?(w))
+        end
+      end
+    end
+
+    describe '#interceptable' do
+      it 'exposes a fixed subset of the ActiveCall.methods' do
+        want = %w(deadline)
+        v = @client_call.interceptable
         want.each do |w|
           expect(v.methods.include?(w))
         end
@@ -609,9 +620,11 @@ describe GRPC::ActiveCall do
         msgs
       end
 
+      int_ctx = GRPC::InterceptionContext.new
+
       @server_thread = Thread.new do
         @server_call.run_server_bidi(
-          fake_gen_each_reply_with_no_call_param)
+          fake_gen_each_reply_with_no_call_param, int_ctx)
         @server_call.send_status(@server_status)
       end
     end
@@ -624,10 +637,11 @@ describe GRPC::ActiveCall do
         call_param.send_initial_metadata
         msgs
       end
+      int_ctx = GRPC::InterceptionContext.new
 
       @server_thread = Thread.new do
         @server_call.run_server_bidi(
-          fake_gen_each_reply_with_call_param)
+          fake_gen_each_reply_with_call_param, int_ctx)
         @server_call.send_status(@server_status)
       end
     end

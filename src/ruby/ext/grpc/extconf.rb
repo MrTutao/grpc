@@ -15,32 +15,8 @@
 require 'etc'
 require 'mkmf'
 
-LIBDIR = RbConfig::CONFIG['libdir']
-INCLUDEDIR = RbConfig::CONFIG['includedir']
-
-HEADER_DIRS = [
-  # Search /opt/local (Mac source install)
-  '/opt/local/include',
-
-  # Search /usr/local (Source install)
-  '/usr/local/include',
-
-  # Check the ruby install locations
-  INCLUDEDIR
-]
-
-LIB_DIRS = [
-  # Search /opt/local (Mac source install)
-  '/opt/local/lib',
-
-  # Search /usr/local (Source install)
-  '/usr/local/lib',
-
-  # Check the ruby install locations
-  LIBDIR
-]
-
 windows = RUBY_PLATFORM =~ /mingw|mswin/
+bsd = RUBY_PLATFORM =~ /bsd/
 
 grpc_root = File.expand_path(File.join(File.dirname(__FILE__), '../../../..'))
 
@@ -48,10 +24,18 @@ grpc_config = ENV['GRPC_CONFIG'] || 'opt'
 
 ENV['MACOSX_DEPLOYMENT_TARGET'] = '10.7'
 
-ENV['AR'] = RbConfig::CONFIG['AR'] + ' rcs'
-ENV['CC'] = RbConfig::CONFIG['CC']
-ENV['CXX'] = RbConfig::CONFIG['CXX']
-ENV['LD'] = ENV['CC']
+if ENV['AR'].nil? || ENV['AR'].size == 0
+    ENV['AR'] = RbConfig::CONFIG['AR'] + ' rcs'
+end
+if ENV['CC'].nil? || ENV['CC'].size == 0
+    ENV['CC'] = RbConfig::CONFIG['CC']
+end
+if ENV['CXX'].nil? || ENV['CXX'].size == 0
+    ENV['CXX'] = RbConfig::CONFIG['CXX']
+end
+if ENV['LD'].nil? || ENV['LD'].size == 0
+    ENV['LD'] = ENV['CC']
+end
 
 ENV['AR'] = 'libtool -o' if RUBY_PLATFORM =~ /darwin/
 
@@ -60,7 +44,7 @@ ENV['EMBED_ZLIB'] = 'true'
 ENV['EMBED_CARES'] = 'true'
 ENV['ARCH_FLAGS'] = RbConfig::CONFIG['ARCH_FLAG']
 ENV['ARCH_FLAGS'] = '-arch i386 -arch x86_64' if RUBY_PLATFORM =~ /darwin/
-ENV['CFLAGS'] = '-DGPR_BACKWARDS_COMPATIBILITY_MODE'
+ENV['CPPFLAGS'] = '-DGPR_BACKWARDS_COMPATIBILITY_MODE'
 
 output_dir = File.expand_path(RbConfig::CONFIG['topdir'])
 grpc_lib_dir = File.join(output_dir, 'libs', grpc_config)
@@ -70,7 +54,8 @@ unless windows
   puts 'Building internal gRPC into ' + grpc_lib_dir
   nproc = 4
   nproc = Etc.nprocessors * 2 if Etc.respond_to? :nprocessors
-  system("make -j#{nproc} -C #{grpc_root} #{grpc_lib_dir}/libgrpc.a CONFIG=#{grpc_config} Q=")
+  make = bsd ? 'gmake' : 'make'
+  system("#{make} -j#{nproc} -C #{grpc_root} #{grpc_lib_dir}/libgrpc.a CONFIG=#{grpc_config} Q=")
   exit 1 unless $? == 0
 end
 
@@ -82,7 +67,7 @@ if grpc_config == 'gcov'
 end
 
 if grpc_config == 'dbg'
-  $CFLAGS << ' -O0'
+  $CFLAGS << ' -O0 -ggdb3'
 end
 
 $LDFLAGS << ' -Wl,-wrap,memcpy' if RUBY_PLATFORM =~ /linux/
@@ -92,7 +77,6 @@ $CFLAGS << ' -std=c99 '
 $CFLAGS << ' -Wall '
 $CFLAGS << ' -Wextra '
 $CFLAGS << ' -pedantic '
-$CFLAGS << ' -Wno-format '
 
 output = File.join('grpc', 'grpc_c')
 puts 'Generating Makefile for ' + output
@@ -109,7 +93,7 @@ if grpc_config == 'opt'
       o.puts i
     end
     o.puts
-    o.puts 'strip:'
+    o.puts 'strip: $(DLLIB)'
     o.puts "\t$(ECHO) Stripping $(DLLIB)"
     o.puts "\t$(Q) #{strip_tool} $(DLLIB)"
   end

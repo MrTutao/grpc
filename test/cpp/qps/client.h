@@ -19,27 +19,34 @@
 #ifndef TEST_QPS_CLIENT_H
 #define TEST_QPS_CLIENT_H
 
+#include <stdlib.h>
+
 #include <condition_variable>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
-#include <grpc++/channel.h>
-#include <grpc++/support/byte_buffer.h>
-#include <grpc++/support/channel_arguments.h>
-#include <grpc++/support/slice.h>
 #include <grpc/support/log.h>
 #include <grpc/support/time.h>
+#include <grpcpp/channel.h>
+#include <grpcpp/support/byte_buffer.h>
+#include <grpcpp/support/channel_arguments.h>
+#include <grpcpp/support/slice.h>
 
+#include "src/proto/grpc/testing/benchmark_service.grpc.pb.h"
 #include "src/proto/grpc/testing/payloads.pb.h"
-#include "src/proto/grpc/testing/services.grpc.pb.h"
 
+#include "src/core/lib/gpr/env.h"
 #include "src/cpp/util/core_stats.h"
 #include "test/cpp/qps/histogram.h"
 #include "test/cpp/qps/interarrival.h"
+#include "test/cpp/qps/qps_worker.h"
+#include "test/cpp/qps/server.h"
 #include "test/cpp/qps/usage_timer.h"
 #include "test/cpp/util/create_test_channel.h"
 #include "test/cpp/util/test_credentials_provider.h"
+
+#define INPROC_NAME_PREFIX "qpsinproc:"
 
 namespace grpc {
 namespace testing {
@@ -87,9 +94,11 @@ class ClientRequestCreator<ByteBuffer> {
  public:
   ClientRequestCreator(ByteBuffer* req, const PayloadConfig& payload_config) {
     if (payload_config.has_bytebuf_params()) {
-      std::unique_ptr<char[]> buf(
-          new char[payload_config.bytebuf_params().req_size()]);
-      Slice slice(buf.get(), payload_config.bytebuf_params().req_size());
+      size_t req_sz =
+          static_cast<size_t>(payload_config.bytebuf_params().req_size());
+      std::unique_ptr<char[]> buf(new char[req_sz]);
+      memset(buf.get(), 0, req_sz);
+      Slice slice(buf.get(), req_sz);
       *req = ByteBuffer(&slice, 1);
     } else {
       GPR_ASSERT(false);  // not appropriate for this specialization
@@ -173,6 +182,19 @@ class Client {
       timer_result = timer_->Mark();
     }
 
+    // Print the median latency per interval for one thread.
+    // If the number of warmup seconds is x, then the first x + 1 numbers in the
+    // vector are from the warmup period and should be discarded.
+    if (median_latency_collection_interval_seconds_ > 0) {
+      std::vector<double> medians_per_interval =
+          threads_[0]->GetMedianPerIntervalList();
+      gpr_log(GPR_INFO, "Num threads: %ld", threads_.size());
+      gpr_log(GPR_INFO, "Number of medians: %ld", medians_per_interval.size());
+      for (size_t j = 0; j < medians_per_interval.size(); j++) {
+        gpr_log(GPR_INFO, "%f", medians_per_interval[j]);
+      }
+    }
+
     grpc_stats_data core_stats;
     grpc_stats_collect(&core_stats);
 
@@ -203,14 +225,114 @@ class Client {
     }
   }
 
+  // Returns the interval (in seconds) between collecting latency medians. If 0,
+  // no periodic median latencies will be collected.
+  double GetLatencyCollectionIntervalInSeconds() {
+    return median_latency_collection_interval_seconds_;
+  }
+
   virtual int GetPollCount() {
     // For sync client.
     return 0;
   }
 
+  bool IsClosedLoop() { return closed_loop_; }
+
+  gpr_timespec NextIssueTime(int thread_idx) {
+    const gpr_timespec result = next_time_[thread_idx];
+    next_time_[thread_idx] =
+        gpr_time_add(next_time_[thread_idx],
+                     gpr_time_from_nanos(interarrival_timer_.next(thread_idx),
+                                         GPR_TIMESPAN));
+    return result;
+  }
+
+  bool ThreadCompleted() {
+    return static_cast<bool>(gpr_atm_acq_load(&thread_pool_done_));
+  }
+
+  class Thread {
+   public:
+    Thread(Client* client, size_t idx)
+        : client_(client), idx_(idx), impl_(&Thread::ThreadFunc, this) {}
+
+    ~Thread() { impl_.join(); }
+
+    void BeginSwap(Histogram* n, StatusHistogram* s) {
+      std::lock_guard<std::mutex> g(mu_);
+      n->Swap(&histogram_);
+      s->swap(statuses_);
+    }
+
+    void MergeStatsInto(Histogram* hist, StatusHistogram* s) {
+      std::unique_lock<std::mutex> g(mu_);
+      hist->Merge(histogram_);
+      MergeStatusHistogram(statuses_, s);
+    }
+
+    std::vector<double> GetMedianPerIntervalList() {
+      return medians_each_interval_list_;
+    }
+
+    void UpdateHistogram(HistogramEntry* entry) {
+      std::lock_guard<std::mutex> g(mu_);
+      if (entry->value_used()) {
+        histogram_.Add(entry->value());
+        if (client_->GetLatencyCollectionIntervalInSeconds() > 0) {
+          histogram_per_interval_.Add(entry->value());
+          double now = UsageTimer::Now();
+          if ((now - interval_start_time_) >=
+              client_->GetLatencyCollectionIntervalInSeconds()) {
+            // Record the median latency of requests from the last interval.
+            // Divide by 1e3 to get microseconds.
+            medians_each_interval_list_.push_back(
+                histogram_per_interval_.Percentile(50) / 1e3);
+            histogram_per_interval_.Reset();
+            interval_start_time_ = now;
+          }
+        }
+      }
+      if (entry->status_used()) {
+        statuses_[entry->status()]++;
+      }
+    }
+
+   private:
+    Thread(const Thread&);
+    Thread& operator=(const Thread&);
+
+    void ThreadFunc() {
+      int wait_loop = 0;
+      while (!gpr_event_wait(
+          &client_->start_requests_,
+          gpr_time_add(gpr_now(GPR_CLOCK_REALTIME),
+                       gpr_time_from_seconds(20, GPR_TIMESPAN)))) {
+        gpr_log(GPR_INFO, "%" PRIdPTR ": Waiting for benchmark to start (%d)",
+                idx_, wait_loop);
+        wait_loop++;
+      }
+
+      client_->ThreadFunc(idx_, this);
+      client_->CompleteThread();
+    }
+
+    std::mutex mu_;
+    Histogram histogram_;
+    StatusHistogram statuses_;
+    Client* client_;
+    const size_t idx_;
+    std::thread impl_;
+    // The following are used only if
+    // median_latency_collection_interval_seconds_ is greater than 0
+    Histogram histogram_per_interval_;
+    std::vector<double> medians_each_interval_list_;
+    double interval_start_time_;
+  };
+
  protected:
   bool closed_loop_;
   gpr_atm thread_pool_done_;
+  double median_latency_collection_interval_seconds_;  // In seconds
 
   void StartThreads(size_t num_threads) {
     gpr_atm_rel_store(&thread_pool_done_, static_cast<gpr_atm>(false));
@@ -226,7 +348,6 @@ class Client {
   }
 
   virtual void DestroyMultithreading() = 0;
-  virtual bool ThreadFunc(HistogramEntry* histogram, size_t thread_idx) = 0;
 
   void SetupLoadTest(const ClientConfig& config, size_t num_threads) {
     // Set up the load distribution based on the number of threads
@@ -261,81 +382,12 @@ class Client {
     }
   }
 
-  gpr_timespec NextIssueTime(int thread_idx) {
-    const gpr_timespec result = next_time_[thread_idx];
-    next_time_[thread_idx] =
-        gpr_time_add(next_time_[thread_idx],
-                     gpr_time_from_nanos(interarrival_timer_.next(thread_idx),
-                                         GPR_TIMESPAN));
-    return result;
-  }
   std::function<gpr_timespec()> NextIssuer(int thread_idx) {
     return closed_loop_ ? std::function<gpr_timespec()>()
                         : std::bind(&Client::NextIssueTime, this, thread_idx);
   }
 
- private:
-  class Thread {
-   public:
-    Thread(Client* client, size_t idx)
-        : client_(client), idx_(idx), impl_(&Thread::ThreadFunc, this) {}
-
-    ~Thread() { impl_.join(); }
-
-    void BeginSwap(Histogram* n, StatusHistogram* s) {
-      std::lock_guard<std::mutex> g(mu_);
-      n->Swap(&histogram_);
-      s->swap(statuses_);
-    }
-
-    void MergeStatsInto(Histogram* hist, StatusHistogram* s) {
-      std::unique_lock<std::mutex> g(mu_);
-      hist->Merge(histogram_);
-      MergeStatusHistogram(statuses_, s);
-    }
-
-   private:
-    Thread(const Thread&);
-    Thread& operator=(const Thread&);
-
-    void ThreadFunc() {
-      while (!gpr_event_wait(
-          &client_->start_requests_,
-          gpr_time_add(gpr_now(GPR_CLOCK_REALTIME),
-                       gpr_time_from_seconds(1, GPR_TIMESPAN)))) {
-        gpr_log(GPR_INFO, "Waiting for benchmark to start");
-      }
-
-      for (;;) {
-        // run the loop body
-        HistogramEntry entry;
-        const bool thread_still_ok = client_->ThreadFunc(&entry, idx_);
-        // lock, update histogram if needed and see if we're done
-        std::lock_guard<std::mutex> g(mu_);
-        if (entry.value_used()) {
-          histogram_.Add(entry.value());
-        }
-        if (entry.status_used()) {
-          statuses_[entry.status()]++;
-        }
-        if (!thread_still_ok) {
-          gpr_log(GPR_ERROR, "Finishing client thread due to RPC error");
-        }
-        if (!thread_still_ok ||
-            static_cast<bool>(gpr_atm_acq_load(&client_->thread_pool_done_))) {
-          client_->CompleteThread();
-          return;
-        }
-      }
-    }
-
-    std::mutex mu_;
-    Histogram histogram_;
-    StatusHistogram statuses_;
-    Client* client_;
-    const size_t idx_;
-    std::thread impl_;
-  };
+  virtual void ThreadFunc(size_t thread_idx, Client::Thread* t) = 0;
 
   std::vector<std::unique_ptr<Thread>> threads_;
   std::unique_ptr<UsageTimer> timer_;
@@ -380,11 +432,69 @@ class ClientImpl : public Client {
           config.server_targets(i % config.server_targets_size()), config,
           create_stub_, i);
     }
-
+    WaitForChannelsToConnect();
+    median_latency_collection_interval_seconds_ =
+        config.median_latency_collection_interval_millis() / 1e3;
     ClientRequestCreator<RequestType> create_req(&request_,
                                                  config.payload_config());
   }
   virtual ~ClientImpl() {}
+  const RequestType* request() { return &request_; }
+
+  void WaitForChannelsToConnect() {
+    int connect_deadline_seconds = 10;
+    /* Allow optionally overriding connect_deadline in order
+     * to deal with benchmark environments in which the server
+     * can take a long time to become ready. */
+    char* channel_connect_timeout_str =
+        gpr_getenv("QPS_WORKER_CHANNEL_CONNECT_TIMEOUT");
+    if (channel_connect_timeout_str != nullptr &&
+        strcmp(channel_connect_timeout_str, "") != 0) {
+      connect_deadline_seconds = atoi(channel_connect_timeout_str);
+    }
+    gpr_log(GPR_INFO,
+            "Waiting for up to %d seconds for all channels to connect",
+            connect_deadline_seconds);
+    gpr_free(channel_connect_timeout_str);
+    gpr_timespec connect_deadline = gpr_time_add(
+        gpr_now(GPR_CLOCK_REALTIME),
+        gpr_time_from_seconds(connect_deadline_seconds, GPR_TIMESPAN));
+    CompletionQueue cq;
+    size_t num_remaining = 0;
+    for (auto& c : channels_) {
+      if (!c.is_inproc()) {
+        Channel* channel = c.get_channel();
+        grpc_connectivity_state last_observed = channel->GetState(true);
+        if (last_observed == GRPC_CHANNEL_READY) {
+          gpr_log(GPR_INFO, "Channel %p connected!", channel);
+        } else {
+          num_remaining++;
+          channel->NotifyOnStateChange(last_observed, connect_deadline, &cq,
+                                       channel);
+        }
+      }
+    }
+    while (num_remaining > 0) {
+      bool ok = false;
+      void* tag = nullptr;
+      cq.Next(&tag, &ok);
+      Channel* channel = static_cast<Channel*>(tag);
+      if (!ok) {
+        gpr_log(GPR_ERROR, "Channel %p failed to connect within the deadline",
+                channel);
+        abort();
+      } else {
+        grpc_connectivity_state last_observed = channel->GetState(true);
+        if (last_observed == GRPC_CHANNEL_READY) {
+          gpr_log(GPR_INFO, "Channel %p connected!", channel);
+          num_remaining--;
+        } else {
+          channel->NotifyOnStateChange(last_observed, connect_deadline, &cq,
+                                       channel);
+        }
+      }
+    }
+  }
 
  protected:
   const int cores_;
@@ -409,22 +519,30 @@ class ClientImpl : public Client {
         type = config.security_params().cred_type();
       }
 
-      channel_ = CreateTestChannel(
-          target, type, config.security_params().server_host_override(),
-          !config.security_params().use_test_ca(),
-          std::shared_ptr<CallCredentials>(), args);
-      gpr_log(GPR_INFO, "Connecting to %s", target.c_str());
-      GPR_ASSERT(channel_->WaitForConnected(
-          gpr_time_add(gpr_now(GPR_CLOCK_REALTIME),
-                       gpr_time_from_seconds(300, GPR_TIMESPAN))));
+      grpc::string inproc_pfx(INPROC_NAME_PREFIX);
+      if (target.find(inproc_pfx) != 0) {
+        channel_ = CreateTestChannel(
+            target, type, config.security_params().server_host_override(),
+            !config.security_params().use_test_ca(),
+            std::shared_ptr<CallCredentials>(), args);
+        gpr_log(GPR_INFO, "Connecting to %s", target.c_str());
+        is_inproc_ = false;
+      } else {
+        grpc::string tgt = target;
+        tgt.erase(0, inproc_pfx.length());
+        int srv_num = std::stoi(tgt);
+        channel_ = (*g_inproc_servers)[srv_num]->InProcessChannel(args);
+        is_inproc_ = true;
+      }
       stub_ = create_stub(channel_);
     }
     Channel* get_channel() { return channel_.get(); }
     StubType* get_stub() { return stub_.get(); }
+    bool is_inproc() { return is_inproc_; }
 
    private:
     void set_channel_args(const ClientConfig& config, ChannelArguments* args) {
-      for (auto channel_arg : config.channel_args()) {
+      for (const auto& channel_arg : config.channel_args()) {
         if (channel_arg.value_case() == ChannelArg::kStrValue) {
           args->SetString(channel_arg.name(), channel_arg.str_value());
         } else if (channel_arg.value_case() == ChannelArg::kIntValue) {
@@ -437,6 +555,7 @@ class ClientImpl : public Client {
 
     std::shared_ptr<Channel> channel_;
     std::unique_ptr<StubType> stub_;
+    bool is_inproc_;
   };
   std::vector<ClientChannelInfo> channels_;
   std::function<std::unique_ptr<StubType>(const std::shared_ptr<Channel>&)>
@@ -445,6 +564,7 @@ class ClientImpl : public Client {
 
 std::unique_ptr<Client> CreateSynchronousClient(const ClientConfig& args);
 std::unique_ptr<Client> CreateAsyncClient(const ClientConfig& args);
+std::unique_ptr<Client> CreateCallbackClient(const ClientConfig& args);
 std::unique_ptr<Client> CreateGenericAsyncStreamingClient(
     const ClientConfig& args);
 

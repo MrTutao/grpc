@@ -19,6 +19,8 @@
 #ifndef GRPC_CORE_LIB_COMPRESSION_STREAM_COMPRESSION_H
 #define GRPC_CORE_LIB_COMPRESSION_STREAM_COMPRESSION_H
 
+#include <grpc/support/port_platform.h>
+
 #include <stdbool.h>
 
 #include <grpc/slice_buffer.h>
@@ -30,7 +32,7 @@ typedef struct grpc_stream_compression_vtable grpc_stream_compression_vtable;
 
 /* Stream compression/decompression context */
 typedef struct grpc_stream_compression_context {
-  const grpc_stream_compression_vtable *vtable;
+  const grpc_stream_compression_vtable* vtable;
 } grpc_stream_compression_context;
 
 typedef enum grpc_stream_compression_method {
@@ -49,16 +51,16 @@ typedef enum grpc_stream_compression_flush {
 } grpc_stream_compression_flush;
 
 struct grpc_stream_compression_vtable {
-  bool (*compress)(grpc_stream_compression_context *ctx, grpc_slice_buffer *in,
-                   grpc_slice_buffer *out, size_t *output_size,
+  bool (*compress)(grpc_stream_compression_context* ctx, grpc_slice_buffer* in,
+                   grpc_slice_buffer* out, size_t* output_size,
                    size_t max_output_size, grpc_stream_compression_flush flush);
-  bool (*decompress)(grpc_stream_compression_context *ctx,
-                     grpc_slice_buffer *in, grpc_slice_buffer *out,
-                     size_t *output_size, size_t max_output_size,
-                     bool *end_of_context);
-  grpc_stream_compression_context *(*context_create)(
+  bool (*decompress)(grpc_stream_compression_context* ctx,
+                     grpc_slice_buffer* in, grpc_slice_buffer* out,
+                     size_t* output_size, size_t max_output_size,
+                     bool* end_of_context);
+  grpc_stream_compression_context* (*context_create)(
       grpc_stream_compression_method method);
-  void (*context_destroy)(grpc_stream_compression_context *ctx);
+  void (*context_destroy)(grpc_stream_compression_context* ctx);
 };
 
 /**
@@ -66,7 +68,7 @@ struct grpc_stream_compression_vtable {
  * at the end of compression. Emits at most \a max_output_size compressed bytes
  * into \a out. If all the bytes in input buffer \a in are depleted and \a flush
  * is not GRPC_STREAM_COMPRESSION_FLUSH_NONE, the corresponding flush method is
- * executed. The total number of bytes emitted is outputed in \a output_size.
+ * executed. The total number of bytes emitted is outputted in \a output_size.
  *
  * A SYNC flush indicates that the entire messages in \a in can be decompressed
  * from \a out. A FINISH flush implies a SYNC flush, and that any further
@@ -74,41 +76,41 @@ struct grpc_stream_compression_vtable {
  * previous compressed bytes. It allows corresponding decompression context to
  * be dropped when reaching this boundary.
  */
-bool grpc_stream_compress(grpc_stream_compression_context *ctx,
-                          grpc_slice_buffer *in, grpc_slice_buffer *out,
-                          size_t *output_size, size_t max_output_size,
+bool grpc_stream_compress(grpc_stream_compression_context* ctx,
+                          grpc_slice_buffer* in, grpc_slice_buffer* out,
+                          size_t* output_size, size_t max_output_size,
                           grpc_stream_compression_flush flush);
 
 /**
  * Decompress bytes provided in \a in with a given context. Emits at most \a
  * max_output_size decompressed bytes into \a out. If decompression process
  * reached the end of a gzip stream, \a end_of_context is set to true; otherwise
- * it is set to false. The total number of bytes emitted is outputed in \a
+ * it is set to false. The total number of bytes emitted is outputted in \a
  * output_size.
  */
-bool grpc_stream_decompress(grpc_stream_compression_context *ctx,
-                            grpc_slice_buffer *in, grpc_slice_buffer *out,
-                            size_t *output_size, size_t max_output_size,
-                            bool *end_of_context);
+bool grpc_stream_decompress(grpc_stream_compression_context* ctx,
+                            grpc_slice_buffer* in, grpc_slice_buffer* out,
+                            size_t* output_size, size_t max_output_size,
+                            bool* end_of_context);
 
 /**
  * Creates a stream compression context. \a pending_bytes_buffer is the input
  * buffer for compression/decompression operations. \a method specifies whether
  * the context is for compression or decompression.
  */
-grpc_stream_compression_context *grpc_stream_compression_context_create(
+grpc_stream_compression_context* grpc_stream_compression_context_create(
     grpc_stream_compression_method method);
 
 /**
  * Destroys a stream compression context.
  */
 void grpc_stream_compression_context_destroy(
-    grpc_stream_compression_context *ctx);
+    grpc_stream_compression_context* ctx);
 
 /**
  * Parse stream compression method based on algorithm name
  */
 int grpc_stream_compression_method_parse(
-    grpc_slice value, bool is_compress, grpc_stream_compression_method *method);
+    grpc_slice value, bool is_compress, grpc_stream_compression_method* method);
 
 #endif
